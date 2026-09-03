@@ -1,0 +1,384 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: ci
+          MYSQL_USER: ci
+          MYSQL_PASSWORD: ci
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm check
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Validate database schema generation
+        env:
+          DATABASE_URL: mysql://ci:ci@127.0.0.1:3306/ci
+        run: pnpm exec drizzle-kit generate
+
+      - name: Apply migrations to MySQL
+        env:
+          DATABASE_URL: mysql://ci:ci@127.0.0.1:3306/ci
+        run: pnpm exec drizzle-kit migrate
+
+      - name: Ensure generated migrations are committed
+        run: |
+          if ! git diff --exit-code -- drizzle/; then
+            echo "Drizzle schema and committed migration metadata are out of sync."
+            echo "Run 'pnpm exec drizzle-kit generate' locally and commit generated files under drizzle/."
+            exit 1
+          fi
+
+      - name: Validate migration from legacy fixtures
+        env:
+          MYSQL_ADMIN_URL: mysql://root:root@127.0.0.1:3306/mysql
+        run: pnpm test:migration:legacy
+
+      - name: Run tests
+        env:
+          DATABASE_URL: mysql://ci:ci@127.0.0.1:3306/ci
+          RUN_MYSQL_INTEGRATION: "1"
+        run: pnpm test
+
+      - name: Build production bundle
+        run: pnpm build
+
+      - name: Install Playwright browser
+        run: pnpm test:e2e:install
+
+      - name: Seed browser-test database
+        env:
+          MYSQL_ADMIN_URL: mysql://root:root@127.0.0.1:3306/mysql
+        run: pnpm test:e2e:seed
+
+      - name: Run pilot browser flow
+        env:
+          E2E_DATABASE_URL: mysql://root:root@127.0.0.1:3306/e2e_ci
+        run: pnpm test:e2e
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MYSQL_DATABASE: luxe
+      MYSQL_ROOT_PASSWORD: luxe_local_root_password
+      GOOGLE_OAUTH_CLIENT_ID: ci-google-client-id
+      GOOGLE_OAUTH_CLIENT_SECRET: ci-google-client-secret
+      GOOGLE_OAUTH_REDIRECT_URI: http://127.0.0.1:3000/api/auth/google/callback
+      AUTH_ALLOWED_EMAILS: ci-local-owner@example.invalid
+      LOCAL_OWNER_EMAIL: ci-local-owner@example.invalid
+      LOCAL_ORGANIZATION_NAME: CI Local Organization
+      LOCAL_ORGANIZATION_PHONE: "+9633000000"
+      LOCAL_ORGANIZATION_ADDRESS: Damascus
+      LOCAL_ORGANIZATION_CURRENCY: SYP
+      EMAIL_DELIVERY_MODE: disabled
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate ephemeral session secret
+        run: node -e "process.stdout.write('JWT_SECRET=' + require('node:crypto').randomBytes(32).toString('base64url') + '\n')" >> "$GITHUB_ENV"
+      - name: Build and start pilot stack
+        run: docker compose up --build -d db migrate bootstrap app worker
+      - name: Wait for readiness
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/health/ready; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs app worker bootstrap migrate db
+          exit 1
+      - name: Verify local bootstrap and secret boundaries
+        run: |
+          owner_count=$(docker compose exec -T db \
+            mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -Nse \
+            "SELECT COUNT(*) FROM users u JOIN organization_members om ON om.userId = u.id JOIN organizations o ON o.id = om.organizationId WHERE u.email = '$LOCAL_OWNER_EMAIL' AND om.role = 'owner' AND o.name = '$LOCAL_ORGANIZATION_NAME'" \
+            "$MYSQL_DATABASE")
+          test "$owner_count" = "1"
+
+          docker compose exec -T app sh -eu -c '
+            test "$AUTH_MODE" = google
+            test "$GOOGLE_OAUTH_REDIRECT_URI" = "http://127.0.0.1:3000/api/auth/google/callback"
+            test -n "$GOOGLE_OAUTH_CLIENT_ID"
+            test -n "$GOOGLE_OAUTH_CLIENT_SECRET"
+            test -n "$JWT_SECRET"
+          '
+          docker compose exec -T worker sh -eu -c '
+            test "$EMAIL_DELIVERY_MODE" = disabled
+            test -z "${JWT_SECRET+x}"
+            test -z "${GOOGLE_OAUTH_CLIENT_ID+x}"
+            test -z "${GOOGLE_OAUTH_CLIENT_SECRET+x}"
+          '
+      - name: Stop pilot stack
+        if: always()
+        run: docker compose down -v
+
+  managed-db-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: luxe-managed-ci
+      APP_IMAGE: local/luxe-app:ci
+      MIGRATE_IMAGE: local/luxe-migrate:ci
+      APP_PORT: 3000
+      DATABASE_URL: mysql://ci:ci@managed-mysql:3306/managed_ci
+      MIGRATION_DATABASE_URL: mysql://ci:ci@managed-mysql:3306/managed_ci
+      GOOGLE_OAUTH_CLIENT_ID: ci-staging-google-client-id
+      GOOGLE_OAUTH_CLIENT_SECRET: ci-staging-google-client-secret
+      GOOGLE_OAUTH_REDIRECT_URI: https://staging.invalid.example.com/api/auth/google/callback
+      AUTH_ALLOWED_EMAILS: ci-staging-owner@example.invalid
+      EMAIL_DELIVERY_MODE: sendgrid
+      SENDGRID_API_KEY: ci-only-sendgrid-key
+      SENDGRID_FROM_EMAIL: ci-notifications@example.invalid
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate ephemeral session secret
+        run: node -e "process.stdout.write('JWT_SECRET=' + require('node:crypto').randomBytes(32).toString('base64url') + '\n')" >> "$GITHUB_ENV"
+
+      - name: Build immutable-image targets
+        run: |
+          docker build --target runtime -t "$APP_IMAGE" .
+          docker build --target migrate -t "$MIGRATE_IMAGE" .
+
+      - name: Validate managed service topology
+        run: |
+          require_digest() {
+            printf '%s\n' "$1" | grep -Eq '^.+@sha256:[0-9a-f]{64}$'
+          }
+          digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          require_digest "registry.invalid/app@sha256:$digest"
+          require_digest "registry.invalid/migrate@sha256:$digest"
+          if require_digest "local/luxe-app:latest"; then
+            echo "Mutable managed image references were accepted."
+            exit 1
+          fi
+          docker compose -f docker-compose.managed.yml config --quiet
+          services=$(docker compose -f docker-compose.managed.yml config --services | sort | paste -sd, -)
+          test "$services" = "app,migrate,worker"
+
+      - name: Start external disposable MySQL
+        run: |
+          docker compose -f docker-compose.managed.yml create migrate
+          docker run --detach \
+            --name managed-mysql \
+            --network "${COMPOSE_PROJECT_NAME}_default" \
+            --network-alias managed-mysql \
+            --env MYSQL_DATABASE=managed_ci \
+            --env MYSQL_USER=ci \
+            --env MYSQL_PASSWORD=ci \
+            --env MYSQL_ROOT_PASSWORD=root \
+            --health-cmd='mysqladmin ping -h 127.0.0.1 -uroot -proot --silent' \
+            --health-interval=5s \
+            --health-timeout=3s \
+            --health-retries=20 \
+            mysql:8.4
+
+          for _ in $(seq 1 30); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' managed-mysql)" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs managed-mysql
+          exit 1
+
+      - name: Migrate and start managed topology
+        run: |
+          docker compose -f docker-compose.managed.yml \
+            up --abort-on-container-exit --exit-code-from migrate migrate
+          docker compose -f docker-compose.managed.yml up -d --no-deps app worker
+
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/health/ready; then
+              break
+            fi
+            sleep 2
+          done
+
+          curl --fail --silent http://127.0.0.1:3000/health/live
+          curl --fail --silent http://127.0.0.1:3000/health/ready
+
+          worker_id=$(docker compose -f docker-compose.managed.yml ps -q worker)
+          for _ in $(seq 1 30); do
+            worker_health=$(docker inspect --format '{{.State.Health.Status}}' "$worker_id")
+            if [ "$worker_health" = "healthy" ] && \
+              docker compose -f docker-compose.managed.yml logs worker | \
+                grep -Fq '[Worker] ready'; then
+              exit 0
+            fi
+            if [ "$worker_health" = "unhealthy" ]; then
+              exit 1
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Verify hardened idempotent runtime
+        run: |
+          app_id=$(docker compose -f docker-compose.managed.yml ps -q app)
+          worker_id=$(docker compose -f docker-compose.managed.yml ps -q worker)
+
+          test "$(docker compose -f docker-compose.managed.yml exec -T app id -u)" = "1000"
+          test "$(docker compose -f docker-compose.managed.yml exec -T worker id -u)" = "1000"
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$worker_id")" = "healthy"
+          test "$(docker compose -f docker-compose.managed.yml port app 3000)" = "127.0.0.1:3000"
+
+          docker compose -f docker-compose.managed.yml exec -T app sh -eu -c '
+            test "$AUTH_MODE" = google
+            test -n "$GOOGLE_OAUTH_CLIENT_ID"
+            test -n "$GOOGLE_OAUTH_CLIENT_SECRET"
+            test -n "$JWT_SECRET"
+            test -z "${SENDGRID_API_KEY+x}"
+          '
+          docker compose -f docker-compose.managed.yml exec -T worker sh -eu -c '
+            test "$EMAIL_DELIVERY_MODE" = sendgrid
+            test -n "$SENDGRID_API_KEY"
+            test -n "$SENDGRID_FROM_EMAIL"
+            test -z "${JWT_SECRET+x}"
+            test -z "${GOOGLE_OAUTH_CLIENT_ID+x}"
+            test -z "${GOOGLE_OAUTH_CLIENT_SECRET+x}"
+          '
+
+          if docker compose -f docker-compose.managed.yml exec -T app sh -c 'touch /app/should-not-write'; then
+            echo "The managed app root filesystem is writable."
+            exit 1
+          fi
+
+          before=$(docker exec managed-mysql mysql -uroot -proot -Nse \
+            'SELECT COUNT(*) FROM managed_ci.__drizzle_migrations')
+          docker compose -f docker-compose.managed.yml run --rm --no-deps migrate
+          after=$(docker exec managed-mysql mysql -uroot -proot -Nse \
+            'SELECT COUNT(*) FROM managed_ci.__drizzle_migrations')
+          test "$before" -gt 0
+          test "$before" = "$after"
+          test -n "$app_id"
+
+      - name: Print managed topology logs
+        if: failure()
+        run: |
+          docker compose -f docker-compose.managed.yml logs --no-color app worker migrate || true
+          docker logs managed-mysql || true
+
+      - name: Remove managed validation stack
+        if: always()
+        run: |
+          mysql_volume=""
+          if docker inspect managed-mysql >/dev/null 2>&1; then
+            mysql_volume=$(docker inspect --format \
+              '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Name}}{{end}}{{end}}' \
+              managed-mysql)
+            docker rm -fv managed-mysql
+          fi
+
+          docker compose -f docker-compose.managed.yml down --remove-orphans
+
+          test -z "$(docker ps -aq --filter name='^/managed-mysql$')"
+          if docker network inspect "${COMPOSE_PROJECT_NAME}_default" >/dev/null 2>&1; then
+            echo "The managed validation network was not removed."
+            exit 1
+          fi
+          if [ -n "$mysql_volume" ] && docker volume inspect "$mysql_volume" >/dev/null 2>&1; then
+            echo "The disposable managed MySQL volume was not removed."
+            exit 1
+          fi
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: infra/gcp/staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialize providers without a backend
+        run: terraform init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate Terraform configuration
+        run: terraform validate -no-color
+
+      - name: Run mocked plan-only infrastructure tests
+        run: terraform test -no-color
+
+      - name: Validate Homs measurement script syntax
+        shell: pwsh
+        run: |
+          foreach ($script in Get-ChildItem "scripts" -Filter "*.ps1") {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $script.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              exit 1
+            }
+          }
+
+      - name: Verify region assessment evidence
+        shell: pwsh
+        run: ./scripts/Test-RegionAssessment.ps1
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

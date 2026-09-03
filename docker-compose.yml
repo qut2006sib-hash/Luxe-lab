@@ -1,0 +1,131 @@
+services:
+  db:
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-luxe}
+      MYSQL_USER: ${MYSQL_USER:-luxe}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-luxe_local_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-luxe_local_root_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'mysqladmin ping -h 127.0.0.1 -uroot -p"$${MYSQL_ROOT_PASSWORD}" --silent',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: mysql://${MYSQL_USER:-luxe}:${MYSQL_PASSWORD:-luxe_local_password}@db:3306/${MYSQL_DATABASE:-luxe}
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: "no"
+
+  bootstrap:
+    build:
+      context: .
+      target: runtime
+    command: ["node", "dist/bootstrap-local-owner.js"]
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_ENV: local
+      DATABASE_URL: mysql://${MYSQL_USER:-luxe}:${MYSQL_PASSWORD:-luxe_local_password}@db:3306/${MYSQL_DATABASE:-luxe}
+      AUTH_ALLOWED_EMAILS: ${AUTH_ALLOWED_EMAILS:?Set AUTH_ALLOWED_EMAILS}
+      LOCAL_OWNER_EMAIL: ${LOCAL_OWNER_EMAIL:?Set LOCAL_OWNER_EMAIL}
+      LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:?Set LOCAL_ORGANIZATION_NAME}
+      LOCAL_ORGANIZATION_PHONE: ${LOCAL_ORGANIZATION_PHONE:?Set LOCAL_ORGANIZATION_PHONE}
+      LOCAL_ORGANIZATION_ADDRESS: ${LOCAL_ORGANIZATION_ADDRESS:-}
+      LOCAL_ORGANIZATION_CURRENCY: ${LOCAL_ORGANIZATION_CURRENCY:-SYP}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: runtime
+      args:
+        VITE_FRONTEND_FORGE_API_URL: ${VITE_FRONTEND_FORGE_API_URL:-}
+        VITE_FRONTEND_FORGE_API_KEY: ${VITE_FRONTEND_FORGE_API_KEY:-}
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+        VITE_SENTRY_ENVIRONMENT: ${VITE_SENTRY_ENVIRONMENT:-development}
+        VITE_ANALYTICS_ENDPOINT: ${VITE_ANALYTICS_ENDPOINT:-}
+        VITE_ANALYTICS_WEBSITE_ID: ${VITE_ANALYTICS_WEBSITE_ID:-}
+    environment:
+      NODE_ENV: ${APP_NODE_ENV:-production}
+      DEPLOYMENT_ENV: local
+      AUTH_MODE: ${AUTH_MODE:-google}
+      DEV_AUTH_OPEN_ID: ${DEV_AUTH_OPEN_ID:-}
+      DEV_SERVE_STATIC: ${DEV_SERVE_STATIC:-false}
+      PORT: 3000
+      DATABASE_URL: mysql://${MYSQL_USER:-luxe}:${MYSQL_PASSWORD:-luxe_local_password}@db:3306/${MYSQL_DATABASE:-luxe}
+      JWT_SECRET: ${JWT_SECRET:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      AUTH_ALLOWED_EMAILS: ${AUTH_ALLOWED_EMAILS:-}
+      BUILT_IN_FORGE_API_URL: ${BUILT_IN_FORGE_API_URL:-}
+      BUILT_IN_FORGE_API_KEY: ${BUILT_IN_FORGE_API_KEY:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - 127.0.0.1:${APP_PORT:-3000}:3000
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: ["node", "dist/worker.js"]
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_ENV: local
+      DATABASE_URL: mysql://${MYSQL_USER:-luxe}:${MYSQL_PASSWORD:-luxe_local_password}@db:3306/${MYSQL_DATABASE:-luxe}
+      EMAIL_DELIVERY_MODE: ${EMAIL_DELIVERY_MODE:-disabled}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

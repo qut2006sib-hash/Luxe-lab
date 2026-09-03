@@ -1,0 +1,73 @@
+name: ${COMPOSE_PROJECT_NAME:-luxe-managed}
+
+x-app-environment: &app-environment
+  NODE_ENV: production
+  DEPLOYMENT_ENV: staging
+  AUTH_MODE: google
+  DATABASE_URL: ${DATABASE_URL:?Set the managed MySQL runtime DATABASE_URL}
+  JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to a generated 32-byte base64url value}
+  GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:?Set GOOGLE_OAUTH_CLIENT_ID}
+  GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:?Set GOOGLE_OAUTH_CLIENT_SECRET}
+  GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:?Set GOOGLE_OAUTH_REDIRECT_URI}
+  AUTH_ALLOWED_EMAILS: ${AUTH_ALLOWED_EMAILS:?Set AUTH_ALLOWED_EMAILS}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-staging}
+
+x-worker-environment: &worker-environment
+  NODE_ENV: production
+  DEPLOYMENT_ENV: staging
+  DATABASE_URL: ${DATABASE_URL:?Set the managed MySQL runtime DATABASE_URL}
+  EMAIL_DELIVERY_MODE: ${EMAIL_DELIVERY_MODE:?Set EMAIL_DELIVERY_MODE=sendgrid for Staging}
+  SENDGRID_API_KEY: ${SENDGRID_API_KEY:?Set SENDGRID_API_KEY for Staging}
+  SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:?Set SENDGRID_FROM_EMAIL for Staging}
+
+x-runtime-security: &runtime-security
+  user: "1000:1000"
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  migrate:
+    image: ${MIGRATE_IMAGE:?Set MIGRATE_IMAGE to a registry digest}
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set the managed MySQL migration DATABASE_URL}
+    <<: *runtime-security
+    restart: "no"
+
+  app:
+    image: ${APP_IMAGE:?Set APP_IMAGE to a registry digest}
+    environment:
+      <<: *app-environment
+      PORT: 3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    <<: *runtime-security
+    ports:
+      - 127.0.0.1:${APP_PORT:-3000}:3000
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  worker:
+    image: ${APP_IMAGE:?Set APP_IMAGE to a registry digest}
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *worker-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    <<: *runtime-security
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 15s
+    restart: unless-stopped

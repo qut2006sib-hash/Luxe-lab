@@ -1,0 +1,35 @@
+# Names and placeholders only. Never put credentials or secret payloads here.
+project_id  = "replace-with-isolated-staging-project"
+region      = "europe-west12"
+name_prefix = "luxe-staging"
+
+# Remains false until the separately approved provisioning phase.
+approve_foundation_provisioning = false
+
+app_image             = "REGION-docker.pkg.dev/PROJECT/REPOSITORY/app@sha256:REPLACE_WITH_64_HEX"
+migrate_image         = "REGION-docker.pkg.dev/PROJECT/REPOSITORY/migrate@sha256:REPLACE_WITH_64_HEX"
+cloud_sql_proxy_image = "REGISTRY/cloud-sql-proxy@sha256:REPLACE_WITH_64_HEX"
+
+# Foundation is the only permitted initial phase.
+enable_migration_job      = false
+enable_runtime            = false
+approve_runtime_release   = false
+allow_unauthenticated_app = false
+
+# Add numeric versions only after the Staging-only Google OAuth, application,
+# and delivery values are injected directly through Secret Manager outside
+# Terraform, Git, shell history, and chat.
+secret_versions = {
+  runtime_database_url       = "REPLACE_WITH_NUMERIC_VERSION"
+  migration_database_url     = "REPLACE_WITH_NUMERIC_VERSION"
+  jwt_secret                 = "REPLACE_WITH_NUMERIC_VERSION"
+  google_oauth_client_id     = "REPLACE_WITH_NUMERIC_VERSION"
+  google_oauth_client_secret = "REPLACE_WITH_NUMERIC_VERSION"
+  google_oauth_redirect_uri  = "REPLACE_WITH_NUMERIC_VERSION"
+  auth_allowed_emails        = "REPLACE_WITH_NUMERIC_VERSION"
+  sendgrid_api_key           = "REPLACE_WITH_NUMERIC_VERSION"
+  sendgrid_from_email        = "REPLACE_WITH_NUMERIC_VERSION"
+
+  # Optional. Omit this entry to leave Sentry completely disabled.
+  # sentry_dsn = "REPLACE_WITH_NUMERIC_VERSION"
+}
