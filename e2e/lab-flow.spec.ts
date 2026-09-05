@@ -12,12 +12,14 @@ test("owner creates, results, approves, and collects a lab order", async ({
 }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "LUXE Lab" })).toBeVisible();
+  await expect(page.getByTestId("order-create")).toBeVisible();
 
   const accountingSetup = page.getByTestId("accounting-setup");
   if (await accountingSetup.isVisible()) {
     const setupFinished = waitForMutation(page, "accounting.setup");
     await accountingSetup.click();
     await setupFinished;
+    await expect(accountingSetup).toHaveCount(0);
   }
 
   await page.goto("/patients");
