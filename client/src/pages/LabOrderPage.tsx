@@ -230,6 +230,7 @@ export default function LabOrderPage({ params }: { params: { id: string } }) {
                 </CardDescription>
               </div>
               <Badge
+                data-testid="order-status"
                 className="w-fit"
                 variant={approved ? "default" : "secondary"}
               >
