@@ -7,7 +7,7 @@ async function waitForMutation(page: Page, path: string) {
   );
 }
 
-test("owner creates a patient, test, and billed lab order", async ({
+test("owner creates, results, approves, and collects a lab order", async ({
   page,
 }) => {
   await page.goto("/");
@@ -49,4 +49,33 @@ test("owner creates a patient, test, and billed lab order", async ({
   await expect(page).toHaveURL(/\/orders\/\d+$/);
   await expect(page.getByText("مريض الاختبار")).toBeVisible();
   await expect(page.getByText("تعداد دم كامل")).toBeVisible();
+
+  const resultInput = page.getByLabel("الكريات البيضاء", { exact: true });
+  await resultInput.fill("7.2");
+  await page.getByRole("button", { name: "حفظ النتائج", exact: true }).click();
+  await expect(page.getByText("جاهز للاعتماد", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(resultInput).toHaveValue("7.2");
+  await page
+    .getByRole("button", { name: "اعتماد النتائج", exact: true })
+    .click();
+  await expect(page.getByText("معتمد", { exact: true })).toBeVisible();
+  await expect(resultInput).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "حفظ النتائج", exact: true })
+  ).toHaveCount(0);
+
+  const paymentInput = page.getByLabel("دفعة نقدية", { exact: true });
+  await paymentInput.fill("10000");
+  await page.getByRole("button", { name: "تسجيل الدفعة", exact: true }).click();
+  await expect(paymentInput).toHaveValue("15000.00");
+  await page.reload();
+  await expect(paymentInput).toHaveValue("15000.00");
+  await page.getByRole("button", { name: "تسجيل الدفعة", exact: true }).click();
+  await expect(paymentInput).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("معتمد", { exact: true })).toBeVisible();
+  await expect(resultInput).toHaveValue("7.2");
+  await expect(resultInput).toBeDisabled();
+  await expect(paymentInput).toHaveCount(0);
 });
