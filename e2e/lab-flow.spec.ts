@@ -50,8 +50,9 @@ test("owner creates, results, approves, and collects a lab order", async ({
   await page.getByText("اختر المريض").click();
   await page.getByRole("option").filter({ hasText: patientName }).click();
   await page
-    .getByTestId(/test-option-/)
+    .locator("label")
     .filter({ hasText: testName })
+    .getByRole("checkbox")
     .click();
   const orderCreated = waitForMutation(page, "lab.orders.create");
   await page.getByTestId("order-create").click();
